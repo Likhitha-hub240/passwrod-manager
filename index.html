@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simple Password Manager</title>
+  <style>
+    :root {
+      --bg:#f4f1ff; --card:#fff; --accent:#7b61ff; --muted:#666;
+    }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:0;background:linear-gradient(135deg,var(--bg),#eef7ff);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;}
+    .wrap{width:100%;max-width:900px}
+    header{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+    h1{margin:0;font-size:1.4rem;color:#2b2b2b}
+    .card{background:var(--card);border-radius:12px;padding:18px;box-shadow:0 6px 22px rgba(15,15,15,0.08)}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    label{font-size:0.85rem;color:var(--muted)}
+    input,button,select,textarea{font:inherit;padding:8px;border-radius:8px;border:1px solid #e6e6ee}
+    button{background:var(--accent);color:white;border:none;padding:8px 12px;cursor:pointer}
+    .small{padding:6px 10px;font-size:.9rem}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{padding:8px;text-align:left;border-bottom:1px solid #f0f0f5}
+    .muted{color:var(--muted);font-size:.9rem}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .right{margin-left:auto}
+    .danger{background:#ff6b6b}
+    .inline{display:inline-block}
+    footer{margin-top:10px;color:var(--muted);font-size:0.85rem;text-align:center}
+    a.link{color:var(--accent);text-decoration:none}
+    @media (max-width:640px){header{flex-direction:column;align-items:flex-start}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🔐 Simple Password Manager</h1>
+      <div class="muted">Client-side encryption, stored in your browser</div>
+    </header>
+
+    <div class="card" id="vault-card">
+      <!-- master password / open or create -->
+      <div id="setup-area" class="row">
+        <div style="flex:1;min-width:220px">
+          <label>Master password</label><br/>
+          <input id="master" type="password" placeholder="Enter master password" />
+        </div>
+        <div style="display:flex;flex-direction:column;justify-content:flex-end">
+          <button id="openBtn" class="small">Open Vault</button>
+          <button id="createBtn" class="small" style="margin-top:6px;background:#2ecc71">Create New Vault</button>
+        </div>
+        <div style="display:flex;flex-direction:column;justify-content:flex-end;margin-left:8px">
+          <button id="exportBtn" class="small">Export Encrypted</button>
+          <input id="importFile" type="file" style="display:none"/>
+          <button id="importBtn" class="small" style="margin-top:6px;background:#f6a821">Import Encrypted</button>
+        </div>
+      </div>
+
+      <div id="vault-area" style="display:none;margin-top:12px">
+        <div class="controls">
+          <div style="flex:1;min-width:220px">
+            <label>Site / Label</label><br/>
+            <input id="label" placeholder="e.g. Gmail" />
+          </div>
+          <div style="width:220px">
+            <label>Username</label><br/>
+            <input id="username" placeholder="email or user" />
+          </div>
+          <div style="width:220px">
+            <label>Password</label><br/>
+            <input id="password" placeholder="password" />
+          </div>
+          <div style="display:flex;flex-direction:column;justify-content:flex-end">
+            <button id="genBtn" class="small" title="Generate strong password">Generate</button>
+            <button id="addBtn" class="small" style="margin-top:6px">Add / Save</button>
+          </div>
+          <div class="right">
+            <button id="changeMasterBtn" class="small">Change master</button>
+            <button id="lockBtn" class="small danger">Lock</button>
+          </div>
+        </div>
+
+        <table id="table">
+          <thead><tr><th>Label</th><th>Username</th><th>Password</th><th style="width:200px">Actions</th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+
+      <div id="status" class="muted" style="margin-top:10px">Status: <span id="statusText">Locked</span></div>
+    </div>
+
+    <footer class="muted">
+      To host: push this file as <code>index.html</code> in a GitHub repo and enable GitHub Pages (branch: main / root). 
+      <br/>This page uses the browser's Web Crypto API — your master password is not stored.
+    </footer>
+  </div>
+
+  <script>
+  // Helper: encoding/decoding
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const b64 = {
+    bufToB64(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))); },
+    b64ToBuf(str){ return Uint8Array.from(atob(str), c=>c.charCodeAt(0)); }
+  };
+
+  // Storage key
+  const STORAGE_KEY = 'simple_pw_manager_v1';
+
+  // Crypto utilities
+  async function deriveKey(master, salt, iterations=200000) {
+    const masterKey = await crypto.subtle.importKey('raw', enc.encode(master), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      {name:'PBKDF2', salt, iterations, hash:'SHA-256'},
+      masterKey,
+      {name:'AES-GCM', length:256},
+      false,
+      ['encrypt','decrypt']
+    );
+  }
+
+  async function encryptVault(obj, master) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const key = await deriveKey(master, salt);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = enc.encode(JSON.stringify(obj));
+    const ciphertext = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, plaintext);
+    return {
+      salt: b64.bufToB64(salt),
+      iv: b64.bufToB64(iv),
+      data: b64.bufToB64(ciphertext)
+    };
+  }
+
+  async function decryptVault(stored, master) {
+    try {
+      const salt = b64.b64ToBuf(stored.salt);
+      const iv = b64.b64ToBuf(stored.iv);
+      const data = b64.b64ToBuf(stored.data);
+      const key = await deriveKey(master, salt);
+      const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv}, key, data);
+      return JSON.parse(dec.decode(plain));
+    } catch(e){
+      throw new Error('Decryption failed — wrong master password or corrupted data.');
+    }
+  }
+
+  // UI + state
+  let vault = {items: []}; // {items: [{id,label,username,password}]}
+  let currentMaster = null;
+  let currentStored = null; // object from localstorage (salt,iv,data)
+
+  const q = id => document.getElementById(id);
+  const statusText = q('statusText');
+
+  function setStatus(s){ statusText.textContent = s; }
+
+  function saveToLocalStorageObject(obj){
+    // Save raw encrypted object (we keep the currentStored as source-of-truth)
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+    currentStored = obj;
+  }
+
+  async function lockVault(){
+    vault = {items:[]};
+    currentMaster = null;
+    q('vault-area').style.display = 'none';
+    q('setup-area').style.display = '';
+    setStatus('Locked');
+    q('tbody').innerHTML = '';
+  }
+
+  function renderTable() {
+    const tbody = q('tbody');
+    tbody.innerHTML = '';
+    vault.items.forEach(it => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${escapeHtml(it.label)}</td>
+                      <td>${escapeHtml(it.username)}</td>
+                      <td><input readonly class="inline" value="${escapeHtml(it.password)}" style="border:none;background:transparent;width:100%"/></td>
+                      <td>
+                        <button onclick="copyPassword('${it.id}')">Copy</button>
+                        <button onclick="editItem('${it.id}')">Edit</button>
+                        <button onclick="deleteItem('${it.id}')" style="background:#ff6b6b">Delete</button>
+                      </td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  // Small helpers for escaping & ids
+  function escapeHtml(s){ return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+  function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,9); }
+
+  // Actions
+  q('createBtn').addEventListener('click', async ()=>{
+    const m = q('master').value;
+    if(!m || m.length < 6){ alert('Use a master password at least 6 characters'); return; }
+    vault = {items: []};
+    const encObj = await encryptVault(vault, m);
+    saveToLocalStorageObject(encObj);
+    currentMaster = m;
+    q('master').value = '';
+    q('setup-area').style.display = 'none';
+    q('vault-area').style.display = '';
+    setStatus('Vault created and unlocked');
+    renderTable();
+  });
+
+  q('openBtn').addEventListener('click', async ()=>{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw){ alert('No vault found. Create one first or import an encrypted file.'); return; }
+    const stored = JSON.parse(raw);
+    const m = q('master').value;
+    try{
+      const data = await decryptVault(stored, m);
+      vault = data;
+      currentMaster = m;
+      currentStored = stored;
+      q('master').value = '';
+      q('setup-area').style.display = 'none';
+      q('vault-area').style.display = '';
+      setStatus('Unlocked');
+      renderTable();
+    } catch(e){
+      alert('Unable to open vault: Wrong master password or corrupted data.');
+    }
+  });
+
+  q('addBtn').addEventListener('click', async ()=>{
+    const label = q('label').value.trim();
+    const username = q('username').value.trim();
+    const password = q('password').value;
+    if(!label){ alert('Label required'); return; }
+    const exists = vault.items.find(i=>i.label===label && i.username===username);
+    if(exists){
+      // update
+      exists.password = password;
+    } else {
+      vault.items.push({id:uid(), label, username, password});
+    }
+    // encrypt & save
+    const encObj = await encryptVault(vault, currentMaster);
+    saveToLocalStorageObject(encObj);
+    q('label').value=''; q('username').value=''; q('password').value='';
+    renderTable();
+    setStatus('Saved');
+  });
+
+  q('genBtn').addEventListener('click', ()=>{
+    q('password').value = generatePassword(16);
+  });
+
+  q('lockBtn').addEventListener('click', lockVault);
+
+  q('exportBtn').addEventListener('click', ()=>{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw){ alert('No encrypted vault to export'); return; }
+    const blob = new Blob([raw], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'vault-encrypted.json'; document.body.appendChild(a); a.click();
+    a.remove(); URL.revokeObjectURL(url);
+  });
+
+  q('importBtn').addEventListener('click', ()=> q('importFile').click());
+  q('importFile').addEventListener('change', async (e)=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    const text = await f.text();
+    try {
+      const parsed = JSON.parse(text);
+      // quick sanity check for fields
+      if(!parsed.salt || !parsed.iv || !parsed.data) throw new Error('Not encrypted vault format');
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+      alert('Imported. Now open the vault using the master password used to create it.');
+    } catch (err) {
+      alert('Import failed: invalid file.');
+    } finally { q('importFile').value = ''; }
+  });
+
+  q('changeMasterBtn').addEventListener('click', async ()=>{
+    if(!currentMaster){ alert('Vault not unlocked'); return; }
+    const newMaster = prompt('Enter new master password (min 6 chars):');
+    if(!newMaster || newMaster.length < 6) return alert('Cancelled or invalid password.');
+    // re-encrypt with new master (we already have vault in memory)
+    const encObj = await encryptVault(vault, newMaster);
+    saveToLocalStorageObject(encObj);
+    currentMaster = newMaster;
+    alert('Master password changed.');
+  });
+
+  // Edit/delete functions exposed globally for inline onclick usage
+  window.copyPassword = async (id) => {
+    const it = vault.items.find(i=>i.id===id);
+    if(!it) return;
+    try {
+      await navigator.clipboard.writeText(it.password);
+      setStatus('Password copied to clipboard');
+    } catch(e) {
+      alert('Copy failed — permission denied.');
+    }
+  };
+  window.editItem = (id) => {
+    const it = vault.items.find(i=>i.id===id);
+    if(!it) return;
+    q('label').value = it.label;
+    q('username').value = it.username;
+    q('password').value = it.password;
+  };
+  window.deleteItem = async (id) => {
+    if(!confirm('Delete this entry?')) return;
+    vault.items = vault.items.filter(i=>i.id!==id);
+    const encObj = await encryptVault(vault, currentMaster);
+    saveToLocalStorageObject(encObj);
+    renderTable();
+  };
+
+  // Utilities
+  function generatePassword(len=16){
+    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}<>?';
+    let out = '';
+    const rng = crypto.getRandomValues(new Uint32Array(len));
+    for(let i=0;i<len;i++){
+      out += chars[rng[i] % chars.length];
+    }
+    return out;
+  }
+
+  // On load, if encrypted data exists show import/open options
+  (function init(){
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(raw) {
+      setStatus('Encrypted vault present. Enter master password to open.');
+    } else {
+      setStatus('No vault found. Create a new vault or import one.');
+    }
+    // expose save/load for debugging (not necessary)
+    window._debug = { vault, saveToLocalStorageObject };
+  })();
+
+  </script>
+</body>
+</html>
